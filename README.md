@@ -114,7 +114,7 @@ pgrep -af PalServer
 Затем:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/palworld-auto-sleep-wake.git
+git clone https://github.com/zlovantuzu/palworld-auto-sleep-wake
 cd palworld-auto-sleep-wake
 
 sudo ./install.sh \
