@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+CONFIG_FILE="${PALWORLD_AUTO_CONFIG:-/etc/palworld-auto/config}"
+PALWORLD_SERVICE="${PALWORLD_SERVICE:-palworld.service}"
+
+log()
+{
+    logger -t palworld-idle "$*"
+    printf '%s %s\n' "$(date '+%F %T')" "$*"
+}
+
+die()
+{
+    log "ERROR: $*"
+    exit 1
+}
+
+is_uint()
+{
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+is_true()
+{
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [[ ! -r "$CONFIG_FILE" ]]; then
+    die "Configuration file is not readable: $CONFIG_FILE"
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${REST_HOST:=127.0.0.1}"
+: "${REST_PORT:=8212}"
+: "${REST_USER:=admin}"
+: "${PASSWORD_FILE:=/etc/palworld-auto/admin-password}"
+: "${IDLE_SECONDS:=900}"
+: "${POLL_SECONDS:=30}"
+: "${LOG_EVERY_SECONDS:=300}"
+: "${SHUTDOWN_WAIT_SECONDS:=30}"
+: "${SHUTDOWN_TIMEOUT_SECONDS:=120}"
+: "${SHUTDOWN_MESSAGE:=Server is empty and will shut down.}"
+: "${FORCE_STOP_AFTER_TIMEOUT:=true}"
+
+for value_name in \
+    REST_PORT \
+    IDLE_SECONDS \
+    POLL_SECONDS \
+    LOG_EVERY_SECONDS \
+    SHUTDOWN_WAIT_SECONDS \
+    SHUTDOWN_TIMEOUT_SECONDS
+do
+    value="${!value_name}"
+    is_uint "$value" || die "$value_name must be a non-negative integer"
+done
+
+(( POLL_SECONDS > 0 )) || die "POLL_SECONDS must be greater than zero"
+
+API_BASE="http://${REST_HOST}:${REST_PORT}/v1/api"
+empty_since=0
+last_status_log=0
+
+get_player_count()
+{
+    local password metrics players
+
+    password="$(<"$PASSWORD_FILE")"
+
+    metrics="$(
+        curl -fsS \
+            --connect-timeout 3 \
+            --max-time 10 \
+            -u "${REST_USER}:${password}" \
+            "${API_BASE}/metrics" 2>/dev/null
+    )" || return 1
+
+    players="$(jq -er '.currentplayernum | tonumber' <<<"$metrics" 2>/dev/null)" ||
+        return 1
+
+    [[ "$players" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$players"
+}
+
+save_world()
+{
+    local password
+    password="$(<"$PASSWORD_FILE")"
+
+    # --data '' is intentional. Palworld requires Content-Length: 0.
+    curl -fsS \
+        --http1.1 \
+        --connect-timeout 3 \
+        --max-time 30 \
+        -u "${REST_USER}:${password}" \
+        --data '' \
+        "${API_BASE}/save" >/dev/null
+}
+
+request_shutdown()
+{
+    local password payload
+    password="$(<"$PASSWORD_FILE")"
+
+    payload="$(
+        jq -nc \
+            --argjson waittime "$SHUTDOWN_WAIT_SECONDS" \
+            --arg message "$SHUTDOWN_MESSAGE" \
+            '{waittime:$waittime,message:$message}'
+    )" || return 1
+
+    curl -fsS \
+        --http1.1 \
+        --connect-timeout 3 \
+        --max-time 30 \
+        -u "${REST_USER}:${password}" \
+        -H 'Content-Type: application/json' \
+        --data-raw "$payload" \
+        "${API_BASE}/shutdown" >/dev/null
+}
+
+while true; do
+    if ! systemctl is-active --quiet "$PALWORLD_SERVICE"; then
+        empty_since=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    if [[ ! -r "$PASSWORD_FILE" ]] || [[ ! -s "$PASSWORD_FILE" ]]; then
+        log "Admin password file is missing or empty: $PASSWORD_FILE"
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    if ! players="$(get_player_count)"; then
+        log "REST API is unavailable or currentplayernum could not be read; server will not be stopped"
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    now="$(date +%s)"
+
+    if (( players > 0 )); then
+        if (( empty_since != 0 )); then
+            log "Players online: $players. Idle timer reset"
+        fi
+
+        empty_since=0
+        last_status_log="$now"
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    if (( empty_since == 0 )); then
+        empty_since="$now"
+        last_status_log="$now"
+        log "Server is empty. Idle timer started"
+    fi
+
+    idle_time=$((now - empty_since))
+    remaining=$((IDLE_SECONDS - idle_time))
+
+    if (( remaining > 0 )) &&
+       (( LOG_EVERY_SECONDS == 0 || now - last_status_log >= LOG_EVERY_SECONDS )); then
+        log "No players for ${idle_time}s; shutdown in ${remaining}s"
+        last_status_log="$now"
+    fi
+
+    if (( idle_time < IDLE_SECONDS )); then
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    # Recheck immediately before save/shutdown to reduce the chance of stopping
+    # while a player is joining.
+    if ! players="$(get_player_count)"; then
+        log "Final player check failed; shutdown cancelled"
+        empty_since=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    if (( players > 0 )); then
+        log "A player joined during the final check. Shutdown cancelled"
+        empty_since=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    log "Server has been empty for ${IDLE_SECONDS}s. Saving world"
+
+    if save_world; then
+        log "World saved successfully"
+    else
+        log "World save failed. Shutdown cancelled"
+        empty_since=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    log "Requesting graceful shutdown"
+
+    if ! request_shutdown; then
+        log "REST shutdown failed. Server remains running"
+        empty_since=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    log "Shutdown accepted. Waiting for Palworld to exit"
+
+    stopped=false
+    for ((i = 0; i < SHUTDOWN_TIMEOUT_SECONDS; i++)); do
+        if ! systemctl is-active --quiet "$PALWORLD_SERVICE"; then
+            stopped=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ "$stopped" == true ]]; then
+        log "Palworld stopped cleanly"
+    elif is_true "$FORCE_STOP_AFTER_TIMEOUT"; then
+        log "Graceful shutdown timed out. Stopping systemd unit"
+        systemctl stop "$PALWORLD_SERVICE"
+    else
+        log "Graceful shutdown timed out. Forced stop is disabled"
+    fi
+
+    empty_since=0
+    last_status_log=0
+    sleep "$POLL_SECONDS"
+done

@@ -1,0 +1,30 @@
+# Palworld installation.
+PALWORLD_DIR="/home/server/palworld"
+START_SCRIPT="./start.sh"
+
+# Actual UDP game port printed by Palworld at startup.
+GAME_PORT=42365
+
+# Local Palworld REST API.
+REST_HOST="127.0.0.1"
+REST_PORT=8212
+REST_USER="admin"
+PASSWORD_FILE="/etc/palworld-auto/admin-password"
+
+# Idle shutdown.
+IDLE_SECONDS=900
+POLL_SECONDS=30
+LOG_EVERY_SECONDS=300
+
+# Graceful shutdown.
+SHUTDOWN_WAIT_SECONDS=30
+SHUTDOWN_TIMEOUT_SECONDS=120
+SHUTDOWN_MESSAGE="Server is empty and will shut down."
+
+# true: use systemctl stop if REST shutdown does not finish in time.
+# false: leave the server running to avoid a forced stop.
+FORCE_STOP_AFTER_TIMEOUT=true
+
+# Wake-on-UDP.
+TCPDUMP_INTERFACE="any"
+WAKE_COOLDOWN_SECONDS=60

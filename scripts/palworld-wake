@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+CONFIG_FILE="${PALWORLD_AUTO_CONFIG:-/etc/palworld-auto/config}"
+PALWORLD_SERVICE="${PALWORLD_SERVICE:-palworld.service}"
+
+log()
+{
+    logger -t palworld-wake "$*"
+    printf '%s %s\n' "$(date '+%F %T')" "$*"
+}
+
+die()
+{
+    log "ERROR: $*"
+    exit 1
+}
+
+if [[ ! -r "$CONFIG_FILE" ]]; then
+    die "Configuration file is not readable: $CONFIG_FILE"
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${GAME_PORT:?GAME_PORT is not configured}"
+: "${TCPDUMP_INTERFACE:=any}"
+: "${WAKE_COOLDOWN_SECONDS:=60}"
+
+[[ "$GAME_PORT" =~ ^[0-9]+$ ]] || die "GAME_PORT must be an integer"
+[[ "$WAKE_COOLDOWN_SECONDS" =~ ^[0-9]+$ ]] ||
+    die "WAKE_COOLDOWN_SECONDS must be an integer"
+
+while true; do
+    if systemctl is-active --quiet "$PALWORLD_SERVICE"; then
+        sleep 5
+        continue
+    fi
+
+    log "Palworld is offline. Waiting for UDP traffic on port ${GAME_PORT}"
+
+    tcpdump \
+        -n \
+        -q \
+        -Q in \
+        -i "$TCPDUMP_INTERFACE" \
+        -c 1 \
+        "udp dst port ${GAME_PORT}" >/dev/null 2>&1
+
+    tcpdump_status=$?
+
+    if (( tcpdump_status != 0 )); then
+        log "tcpdump exited with code ${tcpdump_status}; retrying"
+        sleep 3
+        continue
+    fi
+
+    if systemctl is-active --quiet "$PALWORLD_SERVICE"; then
+        continue
+    fi
+
+    log "Incoming UDP packet detected. Starting Palworld"
+
+    if systemctl start "$PALWORLD_SERVICE"; then
+        log "Start request accepted"
+    else
+        log "Failed to start Palworld"
+    fi
+
+    sleep "$WAKE_COOLDOWN_SECONDS"
+done

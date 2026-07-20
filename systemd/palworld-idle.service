@@ -1,0 +1,14 @@
+[Unit]
+Description=Palworld Idle Shutdown Watcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PALWORLD_AUTO_CONFIG=/etc/palworld-auto/config
+ExecStart=/usr/local/lib/palworld-auto/palworld-idle-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

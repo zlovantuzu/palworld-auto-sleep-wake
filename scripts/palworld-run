@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+CONFIG_FILE="${PALWORLD_AUTO_CONFIG:-/etc/palworld-auto/config}"
+
+if [[ ! -r "$CONFIG_FILE" ]]; then
+    echo "Configuration file is not readable: $CONFIG_FILE" >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${PALWORLD_DIR:?PALWORLD_DIR is not configured}"
+: "${START_SCRIPT:?START_SCRIPT is not configured}"
+
+if [[ ! -d "$PALWORLD_DIR" ]]; then
+    echo "Palworld directory does not exist: $PALWORLD_DIR" >&2
+    exit 1
+fi
+
+if [[ "$START_SCRIPT" = /* ]]; then
+    start_path="$START_SCRIPT"
+else
+    start_path="$PALWORLD_DIR/${START_SCRIPT#./}"
+fi
+
+if [[ ! -x "$start_path" ]]; then
+    echo "Start script is not executable: $start_path" >&2
+    exit 1
+fi
+
+cd "$PALWORLD_DIR"
+exec "$start_path"

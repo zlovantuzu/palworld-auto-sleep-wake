@@ -1,0 +1,14 @@
+[Unit]
+Description=Wake Palworld on Incoming UDP Traffic
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PALWORLD_AUTO_CONFIG=/etc/palworld-auto/config
+ExecStart=/usr/local/lib/palworld-auto/palworld-wake
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
