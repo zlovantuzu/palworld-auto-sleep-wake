@@ -32,6 +32,8 @@ source "$CONFIG_FILE"
 [[ "$WAKE_COOLDOWN_SECONDS" =~ ^[0-9]+$ ]] ||
     die "WAKE_COOLDOWN_SECONDS must be an integer"
 
+tcpdump_failures=0
+
 while true; do
     if systemctl is-active --quiet "$PALWORLD_SERVICE"; then
         sleep 5
@@ -51,10 +53,15 @@ while true; do
     tcpdump_status=$?
 
     if (( tcpdump_status != 0 )); then
-        log "tcpdump exited with code ${tcpdump_status}; retrying"
-        sleep 3
+        (( tcpdump_failures++ ))
+        backoff=$(( tcpdump_failures * 3 ))
+        (( backoff > 30 )) && backoff=30
+        log "tcpdump exited with code ${tcpdump_status}; retrying in ${backoff}s"
+        sleep "$backoff"
         continue
     fi
+
+    tcpdump_failures=0
 
     if systemctl is-active --quiet "$PALWORLD_SERVICE"; then
         continue

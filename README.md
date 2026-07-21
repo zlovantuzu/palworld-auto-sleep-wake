@@ -1,5 +1,7 @@
 # Palworld Auto Sleep / Wake
 
+*[English version](README.en.md)*
+
 Локальная автоматизация для Palworld Dedicated Server под Linux:
 
 - корректно сохраняет мир;

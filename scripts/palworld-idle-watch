@@ -62,22 +62,37 @@ do
 done
 
 (( POLL_SECONDS > 0 )) || die "POLL_SECONDS must be greater than zero"
+(( SHUTDOWN_TIMEOUT_SECONDS > SHUTDOWN_WAIT_SECONDS )) ||
+    die "SHUTDOWN_TIMEOUT_SECONDS must be greater than SHUTDOWN_WAIT_SECONDS"
 
 API_BASE="http://${REST_HOST}:${REST_PORT}/v1/api"
 empty_since=0
 last_status_log=0
 
+# Run curl with Basic Auth credentials supplied via a config on stdin (-K -)
+# instead of -u, so the admin password never appears in the process arguments
+# (visible to other local users through ps / /proc). None of the callers use
+# stdin for anything else.
+curl_api()
+{
+    local password escaped
+    password="$(<"$PASSWORD_FILE")"
+    escaped="${password//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+
+    curl -fsS -K - "$@" <<EOF
+user = "${REST_USER}:${escaped}"
+EOF
+}
+
 get_player_count()
 {
-    local password metrics players
-
-    password="$(<"$PASSWORD_FILE")"
+    local metrics players
 
     metrics="$(
-        curl -fsS \
+        curl_api \
             --connect-timeout 3 \
             --max-time 10 \
-            -u "${REST_USER}:${password}" \
             "${API_BASE}/metrics" 2>/dev/null
     )" || return 1
 
@@ -90,23 +105,18 @@ get_player_count()
 
 save_world()
 {
-    local password
-    password="$(<"$PASSWORD_FILE")"
-
     # --data '' is intentional. Palworld requires Content-Length: 0.
-    curl -fsS \
+    curl_api \
         --http1.1 \
         --connect-timeout 3 \
         --max-time 30 \
-        -u "${REST_USER}:${password}" \
         --data '' \
         "${API_BASE}/save" >/dev/null
 }
 
 request_shutdown()
 {
-    local password payload
-    password="$(<"$PASSWORD_FILE")"
+    local payload
 
     payload="$(
         jq -nc \
@@ -115,11 +125,10 @@ request_shutdown()
             '{waittime:$waittime,message:$message}'
     )" || return 1
 
-    curl -fsS \
+    curl_api \
         --http1.1 \
         --connect-timeout 3 \
         --max-time 30 \
-        -u "${REST_USER}:${password}" \
         -H 'Content-Type: application/json' \
         --data-raw "$payload" \
         "${API_BASE}/shutdown" >/dev/null

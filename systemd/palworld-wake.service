@@ -10,5 +10,10 @@ ExecStart=/usr/local/lib/palworld-auto/palworld-wake
 Restart=always
 RestartSec=3
 
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target

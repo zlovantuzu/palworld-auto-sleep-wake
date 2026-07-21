@@ -12,7 +12,18 @@ SYSTEMD_DIR="/etc/systemd/system"
 PALWORLD_USER="server"
 PALWORLD_GROUP=""
 PALWORLD_DIR="/home/server/palworld"
+START_SCRIPT="./start.sh"
 INSTALL_DEPS=true
+
+# Escape a string so it can be used safely as a sed replacement.
+sed_escape_replacement()
+{
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//&/\\&}"
+    value="${value//|/\\|}"
+    printf '%s' "$value"
+}
 
 usage()
 {
@@ -24,6 +35,8 @@ Options:
   --user USER              Linux user that runs Palworld (default: server)
   --group GROUP            Linux group (default: user's primary group)
   --palworld-dir PATH      Palworld directory
+  --start-script PATH      Start script, relative to the Palworld directory
+                           or absolute (default: ./start.sh)
   --no-install-deps        Do not install missing apt dependencies
   -h, --help               Show this help
 EOF
@@ -41,6 +54,10 @@ while (($#)); do
             ;;
         --palworld-dir)
             PALWORLD_DIR="${2:?Missing value for --palworld-dir}"
+            shift 2
+            ;;
+        --start-script)
+            START_SCRIPT="${2:?Missing value for --start-script}"
             shift 2
             ;;
         --no-install-deps)
@@ -89,12 +106,18 @@ if [[ ! -d "$PALWORLD_DIR" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$PALWORLD_DIR/start.sh" ]]; then
-    echo "start.sh was not found in: $PALWORLD_DIR" >&2
+if [[ "$START_SCRIPT" = /* ]]; then
+    start_path="$START_SCRIPT"
+else
+    start_path="$PALWORLD_DIR/${START_SCRIPT#./}"
+fi
+
+if [[ ! -f "$start_path" ]]; then
+    echo "Start script was not found: $start_path" >&2
     exit 1
 fi
 
-chmod +x "$PALWORLD_DIR/start.sh"
+chmod +x "$start_path"
 
 missing=()
 for command_name in curl jq tcpdump systemctl; do
@@ -113,7 +136,9 @@ if ((${#missing[@]})); then
 fi
 
 install -d -m 0755 "$INSTALL_DIR"
-install -d -m 0700 "$CONFIG_DIR"
+# The config directory must be traversable by the (non-root) Palworld user so
+# palworld-run can read the config. Secrets live in admin-password (0600).
+install -d -m 0755 "$CONFIG_DIR"
 
 install -m 0755 "$PROJECT_DIR/scripts/palworld-run" \
     "$INSTALL_DIR/palworld-run"
@@ -123,21 +148,22 @@ install -m 0755 "$PROJECT_DIR/scripts/palworld-wake" \
     "$INSTALL_DIR/palworld-wake"
 
 if [[ ! -e "$CONFIG_FILE" ]]; then
-    install -m 0600 "$PROJECT_DIR/config/palworld-auto.conf.example" \
+    install -m 0644 "$PROJECT_DIR/config/palworld-auto.conf.example" \
         "$CONFIG_FILE"
 
-    escaped_dir="${PALWORLD_DIR//\\/\\\\}"
-    escaped_dir="${escaped_dir//&/\\&}"
-    escaped_dir="${escaped_dir//|/\\|}"
-
     sed -i \
-        "s|^PALWORLD_DIR=.*|PALWORLD_DIR=\"${escaped_dir}\"|" \
+        -e "s|^PALWORLD_DIR=.*|PALWORLD_DIR=\"$(sed_escape_replacement "$PALWORLD_DIR")\"|" \
+        -e "s|^START_SCRIPT=.*|START_SCRIPT=\"$(sed_escape_replacement "$START_SCRIPT")\"|" \
         "$CONFIG_FILE"
 
     echo "Created configuration: $CONFIG_FILE"
 else
     echo "Keeping existing configuration: $CONFIG_FILE"
 fi
+
+# Ensure the config is readable by the non-root Palworld user, including on
+# upgrades from older installs that created it as 0600.
+chmod 0644 "$CONFIG_FILE"
 
 if [[ ! -e "$PASSWORD_FILE" ]]; then
     install -m 0600 /dev/null "$PASSWORD_FILE"
