@@ -39,6 +39,9 @@ Options:
                            or absolute (default: ./start.sh)
   --no-install-deps        Do not install missing apt dependencies
   -h, --help               Show this help
+
+If the start script is missing and this is run interactively, the
+installer offers to create it and asks for the game port and player limit.
 EOF
 }
 
@@ -112,9 +115,46 @@ else
     start_path="$PALWORLD_DIR/${START_SCRIPT#./}"
 fi
 
+start_script_port=""
+
 if [[ ! -f "$start_path" ]]; then
-    echo "Start script was not found: $start_path" >&2
-    exit 1
+    if [[ ! -t 0 ]]; then
+        echo "Start script was not found: $start_path" >&2
+        exit 1
+    fi
+
+    echo "Start script was not found: $start_path"
+    read -r -p "Create it now? [y/N] " create_start_script
+
+    if [[ ! "${create_start_script,,}" =~ ^y(es)?$ ]]; then
+        echo "Start script was not found: $start_path" >&2
+        exit 1
+    fi
+
+    read -r -p "Game UDP port [42365]: " start_script_port
+    start_script_port="${start_script_port:-42365}"
+    [[ "$start_script_port" =~ ^[0-9]+$ ]] ||
+        { echo "Port must be a number" >&2; exit 1; }
+
+    read -r -p "Max players [32]: " start_script_players
+    start_script_players="${start_script_players:-32}"
+    [[ "$start_script_players" =~ ^[0-9]+$ ]] ||
+        { echo "Player count must be a number" >&2; exit 1; }
+
+    install -d -m 0755 "$(dirname -- "$start_path")"
+
+    cat >"$start_path" <<START_SCRIPT_EOF
+#!/usr/bin/env bash
+exec ./PalServer.sh \\
+  -port=${start_script_port} \\
+  -players=${start_script_players} \\
+  -useperfthreads \\
+  -NoAsyncLoadingThread \\
+  -UseMultithreadForDS
+START_SCRIPT_EOF
+
+    chown "${PALWORLD_USER}:${PALWORLD_GROUP}" "$start_path"
+    echo "Created start script: $start_path"
 fi
 
 chmod +x "$start_path"
@@ -155,6 +195,10 @@ if [[ ! -e "$CONFIG_FILE" ]]; then
         -e "s|^PALWORLD_DIR=.*|PALWORLD_DIR=\"$(sed_escape_replacement "$PALWORLD_DIR")\"|" \
         -e "s|^START_SCRIPT=.*|START_SCRIPT=\"$(sed_escape_replacement "$START_SCRIPT")\"|" \
         "$CONFIG_FILE"
+
+    if [[ -n "$start_script_port" ]]; then
+        sed -i "s|^GAME_PORT=.*|GAME_PORT=${start_script_port}|" "$CONFIG_FILE"
+    fi
 
     echo "Created configuration: $CONFIG_FILE"
 else

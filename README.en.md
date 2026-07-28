@@ -88,6 +88,97 @@ sudo apt update
 sudo apt install -y curl jq tcpdump
 ```
 
+## Quick start
+
+The full path from a clean machine to working automation, in order:
+
+1. [Install the Palworld Dedicated Server](#installing-the-palworld-dedicated-server) (SteamCMD).
+2. [Enable the REST API](#configuring-the-palworld-rest-api) in `PalWorldSettings.ini` and set `AdminPassword`.
+3. [Install this automation](#installation) via `sudo ./install.sh ...`.
+4. If the password wasn't entered during installation, set it separately (see the installer's output).
+5. [Start all the services](#start-everything).
+6. [Check the REST API](#checking-the-rest-api) and the services' status.
+
+To pause or fully stop the automation, see [Stop everything](#stop-everything).
+
+Each step is described in detail in its own section below.
+
+## Installing the Palworld Dedicated Server
+
+This repository does not install Palworld itself — only the sleep/wake automation. You need to install the server beforehand, and pass its install directory as `--palworld-dir` (see below) so the paths line up.
+
+Install SteamCMD (official Valve guide): <https://developer.valvesoftware.com/wiki/SteamCMD>
+
+Install or update the Palworld Dedicated Server into a fixed directory (anonymous login, `app_update 2394010` is the Palworld Dedicated Server app):
+
+```bash
+mkdir -p /home/server/palworld
+
+steamcmd \
+  +force_install_dir /home/server/palworld \
+  +login anonymous \
+  +app_update 2394010 validate \
+  +quit
+```
+
+The same command is used to update the server later.
+
+After installation the directory looks like this:
+
+```text
+/home/server/palworld/
+├── PalServer.sh
+├── DefaultPalWorldSettings.ini
+└── Pal/
+    ├── Binaries/Linux/PalServer-Linux-Shipping
+    └── Saved/
+        ├── Config/LinuxServer/PalWorldSettings.ini
+        └── SaveGames/
+```
+
+Pass exactly this directory as `--palworld-dir` / `PALWORLD_DIR`. The start script (`START_SCRIPT`) defaults to `./start.sh`. If you don't have your own wrapper by that name, point it at the official binary directly:
+
+```bash
+sudo ./install.sh \
+  --user server \
+  --palworld-dir /home/server/palworld \
+  --start-script ./PalServer.sh
+```
+
+Official dedicated server deployment guide: <https://docs.palworldgame.com/getting-started/deploy-dedicated-server/>
+
+### The start script (`start.sh`)
+
+If `START_SCRIPT` isn't found at the configured path, `install.sh` — when run in an interactive terminal — offers to create it and asks for the game's UDP port and the player limit (defaulting to `42365` and `32`). The port you enter is also written into `GAME_PORT` in the generated `/etc/palworld-auto/config`, so `palworld-wake` listens on the same port. In a non-interactive run (e.g. from another script), a missing file just fails the install.
+
+If you want to launch the server with parameters (port, player limit, multithreading) instead of a bare `./PalServer.sh`, you can also create `start.sh` in `PALWORLD_DIR` yourself and make it executable (`chmod +x`) — this is the same template the installer uses:
+
+```bash
+#!/usr/bin/env bash
+exec ./PalServer.sh \
+  -port=42365 \
+  -players=32 \
+  -useperfthreads \
+  -NoAsyncLoadingThread \
+  -UseMultithreadForDS
+```
+
+`-port` must match `GAME_PORT` in `/etc/palworld-auto/config`, otherwise `palworld-wake` listens on the wrong port. `exec` replaces the bash process with `PalServer.sh` so `systemd` manages the actual game server process, not an extra wrapper.
+
+Officially documented command-line arguments: <https://docs.palworldgame.com/settings-and-operation/arguments/>
+
+| Flag | Purpose |
+|---|---|
+| `-port=8211` | Server UDP port |
+| `-players=32` | Maximum players |
+| `-useperfthreads` `-NoAsyncLoadingThread` `-UseMultithreadForDS` | The official recommended multithreading combo (used together) |
+| `-NumberOfWorkerThreadsServer=N` | Number of worker threads |
+| `-publiclobby` | Set up the server as a community server |
+| `-publicip=x.x.x.x`, `-publicport=xxxx` | Explicitly set the public IP/port |
+| `-logformat=text\|json` | Log format |
+
+`ServerName`, `ServerPassword`, and `AdminPassword` are **not documented as command-line arguments** — set them only inside `OptionSettings=(...)` in `PalWorldSettings.ini` (see below), not as `start.sh` flags.
+
 ## Configuring the Palworld REST API
 
 Open:
@@ -96,7 +187,21 @@ Open:
 nano /home/server/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
 ```
 
-Inside `OptionSettings=(...)` you need:
+If the file does not exist yet, create it from the template (editing `DefaultPalWorldSettings.ini` has no effect):
+
+```bash
+cp /home/server/palworld/DefaultPalWorldSettings.ini \
+   /home/server/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
+```
+
+The whole file is a single line shaped like this (values shortened for the example — full parameter list linked below):
+
+```ini
+[/Script/Pal.PalGameWorldSettings]
+OptionSettings=(Difficulty=None,DayTimeSpeedRate=1.000000,ExpRate=1.000000,ServerName="My Palworld Server",ServerDescription="",AdminPassword="STRONG_PASSWORD",ServerPassword="",PublicPort=8211,PublicIP="",RCONEnabled=False,RCONPort=25575,RESTAPIEnabled=True,RESTAPIPort=8212,ServerPlayerMaxNum=32)
+```
+
+Inside `OptionSettings=(...)` you need at least (no line breaks):
 
 ```ini
 AdminPassword="STRONG_PASSWORD"
@@ -106,11 +211,59 @@ RESTAPIPort=8212
 
 Do not expose the REST API port `8212` to the internet. The scripts only reach it through `127.0.0.1`.
 
-Official documentation:
+Full parameter list and descriptions: <https://docs.palworldgame.com/settings-and-operation/configuration/>
+
+Official REST API documentation:
 
 - [Palworld REST API](https://docs.palworldgame.com/api/rest-api/palwold-rest-api/)
 - [Save API](https://docs.palworldgame.com/api/rest-api/save/)
 - [Shutdown API](https://docs.palworldgame.com/api/rest-api/shutdown/)
+
+### Quick config-editing commands
+
+Stop the server before editing:
+
+```bash
+sudo systemctl stop palworld.service
+```
+
+Set the path once:
+
+```bash
+CONFIG="/home/server/palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
+```
+
+Change the admin password:
+
+```bash
+sudo sed -i -E \
+  's/AdminPassword="[^"]*"/AdminPassword="NEW_PASSWORD"/' \
+  "$CONFIG"
+```
+
+Enable the REST API and set its port:
+
+```bash
+sudo sed -i -E 's/RESTAPIEnabled=(True|False)/RESTAPIEnabled=True/' "$CONFIG"
+sudo sed -i -E 's/RESTAPIPort=[0-9]+/RESTAPIPort=8212/' "$CONFIG"
+```
+
+Check current values without revealing the password:
+
+```bash
+sudo grep -oE \
+  'AdminPassword="[^"]*"|RESTAPIEnabled=(True|False)|RESTAPIPort=[0-9]+' \
+  "$CONFIG" |
+sed -E 's/AdminPassword="[^"]*"/AdminPassword="***"/'
+```
+
+If you changed the password or the REST API port, update the automation side too:
+
+```bash
+sudo sh -c 'umask 077; printf "%s\n" "NEW_PASSWORD" > /etc/palworld-auto/admin-password'
+sudo nano /etc/palworld-auto/config   # REST_PORT, if you changed RESTAPIPort
+sudo systemctl restart palworld-idle.service
+```
 
 ## Installation
 
@@ -231,7 +384,53 @@ sudo systemctl restart palworld-wake.service
 
 The config directory `/etc/palworld-auto` is `0755` and `config` is `0644`, so the non-root Palworld user can read it (`palworld-run` sources it at startup). Secrets stay in `admin-password`, which is `0600` and readable only by root. Do not put the admin password in `config`.
 
-## Managing the server
+## Managing the services
+
+The installer already enables `palworld-wake.service` and, if a password was set, `palworld-idle.service`. Below are combined commands to bring everything up or down at once, followed by per-unit management.
+
+If commands in this section fail with something like `Unit file palworld-idle.service does not exist`, `sudo ./install.sh ...` hasn't run successfully yet — the unit files don't appear in `/etc/systemd/system` just because you cloned the repo. See [Installation](#installation) and [Common problems](#unit-file-palworld-idleservice-does-not-exist).
+
+### Start everything
+
+If the automation is already installed (see [Installation](#installation)) but the services aren't running:
+
+```bash
+sudo systemctl enable --now palworld-wake.service
+sudo systemctl enable --now palworld-idle.service   # only if an admin password is set
+```
+
+You don't have to start the game server by hand — `palworld-wake.service` will start it on the first UDP packet. But you can start it right away too:
+
+```bash
+sudo systemctl start palworld.service
+```
+
+Check that everything is running:
+
+```bash
+systemctl status palworld-wake.service palworld-idle.service palworld.service
+```
+
+Expected: `palworld-wake` and `palworld-idle` are `active (running)`. `palworld` is `active (running)` if you started it by hand, or `inactive (dead)` until the first connection attempt (that's expected — see [Important limitation](#important-limitation)).
+
+### Stop everything
+
+Pause the automation without touching a running server:
+
+```bash
+sudo systemctl disable --now palworld-idle.service
+sudo systemctl disable --now palworld-wake.service
+```
+
+Also stop the game server itself:
+
+```bash
+sudo systemctl stop palworld.service
+```
+
+After this, neither idle shutdown nor wake-on-UDP will work until you re-enable the services (see [Start everything](#start-everything) above).
+
+### Game server (`palworld.service`)
 
 Start:
 
@@ -263,6 +462,24 @@ Expected:
 
 ```text
 disabled
+```
+
+### Idle shutdown (`palworld-idle.service`)
+
+```bash
+sudo systemctl enable --now palworld-idle.service   # enable at boot and start now
+sudo systemctl restart palworld-idle.service        # apply a config change
+sudo systemctl disable --now palworld-idle.service  # stop and remove from boot
+systemctl status palworld-idle.service
+```
+
+### Wake-on-UDP (`palworld-wake.service`)
+
+```bash
+sudo systemctl enable --now palworld-wake.service
+sudo systemctl restart palworld-wake.service
+sudo systemctl disable --now palworld-wake.service
+systemctl status palworld-wake.service
 ```
 
 ## Checking the REST API
@@ -347,6 +564,52 @@ systemctl status palworld.service
 
 For a real test, try connecting from the game by IP and port. The first attempt starts the server; the next one succeeds after it has loaded.
 
+## Importing a local (co-op) save onto the dedicated server
+
+A local (co-op) Palworld save does not run on a dedicated server as-is — it needs converting:
+
+<https://hub.tcno.co/games/palworld/converter/>
+
+The tool runs entirely in the browser, without uploading files to a third-party server. Upload your local save folder (in particular `Level.sav` and the player save folder) and download a ZIP with the converted files.
+
+Where to place the result on the server:
+
+1. Stop the server:
+
+   ```bash
+   sudo systemctl stop palworld.service
+   ```
+
+2. Find the current world's folder — a subdirectory with a long hex ID inside `SaveGames`:
+
+   ```bash
+   find /home/server/palworld/Pal/Saved/SaveGames -mindepth 2 -maxdepth 2 -type d
+   ```
+
+   If the server has never been started, start it once and stop it — this creates `Pal/Saved/SaveGames/0/<WORLD_ID>/` with a template set of files (`Level.sav`, `LevelMeta.sav`, `WorldOption.sav`, `Players/`).
+
+3. Back up before overwriting:
+
+   ```bash
+   sudo cp -a /home/server/palworld/Pal/Saved/SaveGames \
+             /home/server/palworld/Pal/Saved/SaveGames.bak
+   ```
+
+4. Extract the converter's ZIP into that world folder, replacing the existing files (`Level.sav`, player files, etc.), as instructed on the converter page.
+
+5. Restore ownership to the user Palworld runs as:
+
+   ```bash
+   sudo chown -R server:server /home/server/palworld/Pal/Saved/SaveGames
+   ```
+
+6. Start the server and check the logs:
+
+   ```bash
+   sudo systemctl start palworld.service
+   sudo journalctl -fu palworld.service
+   ```
+
 ## Logs
 
 All components:
@@ -378,6 +641,25 @@ sudo journalctl -fu palworld.service
 ```
 
 ## Common problems
+
+### `Unit file palworld-idle.service does not exist`
+
+`systemctl enable/start/status` can't find the unit. This means the automation hasn't actually been installed into `/etc/systemd/system` — the `systemd/*.service` files in the cloned repo do nothing on their own; the installer has to copy them there.
+
+Check whether the units are actually installed:
+
+```bash
+systemctl list-unit-files | grep palworld
+```
+
+If that's empty, run the installer from the repo root (not from the `systemd/` subdirectory):
+
+```bash
+cd ~/palworld-auto-sleep-wake
+sudo ./install.sh --user server --palworld-dir /home/server/palworld
+```
+
+Read its output carefully — if the installer failed (missing dependencies, a user or directory that doesn't exist, etc.), the units won't be installed. Then retry [Start everything](#start-everything).
 
 ### `Unauthorized (AdminPassword is empty)`
 
